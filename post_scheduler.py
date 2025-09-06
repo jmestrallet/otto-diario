@@ -33,19 +33,23 @@ def due(now, when):
     return 0 <= delta <= WINDOW_MIN
 
 def refresh_access_token(acc_alias, refresh_token):
-    data = {"grant_type":"refresh_token","refresh_token":refresh_token,"client_id":CLIENT_ID}
-    r = requests.post(f"{X_API}/oauth2/token",
-                      headers={"Content-Type":"application/x-www-form-urlencoded"},
-                      data=data, timeout=30)
-    print("TOKEN STATUS:", r.status_code, r.text)  # <— veremos "scope": "..."
+    data = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID}
+    r = requests.post(
+        f"{X_API}/oauth2/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=data,
+        timeout=30,
+    )
+    print("TOKEN STATUS:", r.status_code, r.text)  # acá ves el cuerpo si falla (400/401)
     r.raise_for_status()
     j = r.json()
-    # guarda refresh nuevo si vino rotado
+    # si el refresh rota, lo guardamos para que el job siguiente actualice el Secret
     new_rt = j.get("refresh_token")
     if new_rt and new_rt != refresh_token:
         NEW_REFRESH[acc_alias] = new_rt
-    print("SCOPES:", j.get("scope"))              # <— debería incluir tweet.write y offline.access
+    print("SCOPES:", j.get("scope"))  # debería incluir: users.read tweet.write media.write offline.access
     return j["access_token"]
+
 
 def get_bytes(path_or_url):
     if not path_or_url: return None, None
@@ -76,14 +80,19 @@ def set_alt_text(token, media_id, alt_text):
 
 def post_tweet(token, text, media_id=None):
     payload = {"text": text}
-    if media_id: payload["media"] = {"media_ids":[media_id]}
-    r = requests.post(f"{X_API}/tweets",
-        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-        data=json.dumps(payload))
+    if media_id:
+        payload["media"] = {"media_ids": [media_id]}
+    r = requests.post(
+        f"{X_API}/tweets",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        data=json.dumps(payload),
+        timeout=30,
+    )
     if r.status_code >= 400:
-        print("POST ERROR:", r.status_code, r.text)  # <— cuerpo exacto del 403
+        print("POST ERROR:", r.status_code, r.text)  # logea el cuerpo exacto del 403
     r.raise_for_status()
     return r.json()["data"]["id"]
+
 
 def load_state():
     if not os.path.exists(STATE_FILE): return set()
@@ -94,42 +103,61 @@ def save_state(keys):
         for k in keys: f.write(k+"\n")
 
 def main():
-    now = now_utc(); posted = load_state(); due_rows=[]
+    now = now_utc()
+    posted = load_state()
+    due_rows = []
     rows = list(csv.DictReader(open(CSV_FILE, encoding="utf-8")))
     for r in rows:
         item = parse_row(r)
-        if not item or item["key"] in posted: continue
-        if due(now, item["when_utc"]): due_rows.append(item)
-    if not due_rows:
-        print("Nada para publicar ahora."); return
+        if not item or item["key"] in posted:
+            continue
+        if due(now, item["when_utc"]):
+            due_rows.append(item)
 
-    just=[]
+    if not due_rows:
+        print("Nada para publicar ahora.")
+        return
+
+    just = []
     for item in due_rows:
         for acc, lang in ACCOUNTS.items():
             rt = os.getenv(f"REFRESH_TOKEN_{acc}")
             if not rt:
-                print(f"[{acc}] sin REFRESH_TOKEN_*, salto."); 
+                print(f"[{acc}] sin REFRESH_TOKEN_*, salto.")
                 continue
+
             token = refresh_access_token(acc, rt)
+
+            # debug: confirma user-context y permisos efectivos
+            me = requests.get(
+                f"{X_API}/users/me",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15,
+            )
+            print(f"[{acc}] ME:", me.status_code, me.text[:200])
+
             media_id = None
             if item["image"]:
                 data, ct = get_bytes(item["image"])
                 if data:
                     try:
                         media_id = upload_media(token, data, ct)
-                        set_alt_text(token, media_id, item["alt"].get(lang,""))
+                        set_alt_text(token, media_id, item["alt"].get(lang, ""))
                     except Exception as e:
                         print(f"[{acc}] no pude subir imagen: {e}. Publico solo texto.")
+
             tid = post_tweet(token, item["text"][lang], media_id)
             print(f"[{acc}] publicado {tid}")
+
         just.append(item["key"])
+
     save_state(just)
 
-    # Si hubo rotación, escribimos un archivo para que el siguiente paso actualice Secrets
     if NEW_REFRESH:
-        with open("new_refresh_tokens.json","w",encoding="utf-8") as f:
+        with open("new_refresh_tokens.json", "w", encoding="utf-8") as f:
             json.dump(NEW_REFRESH, f)
         print("ROTATED:", NEW_REFRESH)
+
 
 if __name__ == "__main__":
     main()
