@@ -31,11 +31,19 @@ def due(now, when):
     return 0 <= delta <= WINDOW_MIN
 
 def refresh_access_token(refresh_token):
-    data = {"grant_type":"refresh_token","refresh_token":refresh_token,"client_id":CLIENT_ID}
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLIENT_ID,
+    }
     r = requests.post(f"{X_API}/oauth2/token",
-                      headers={"Content-Type":"application/x-www-form-urlencoded"}, data=data, timeout=30)
+                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                      data=data, timeout=30)
+    print("TOKEN STATUS:", r.status_code, r.text)  # <— verás "scope": "..."
     r.raise_for_status()
-    return r.json()["access_token"]
+    j = r.json()
+    print("SCOPES:", j.get("scope"))
+    return j["access_token"]
 
 def get_bytes(path_or_url):
     if not path_or_url: return None, None
