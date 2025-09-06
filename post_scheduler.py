@@ -1,24 +1,35 @@
-# Publicador automático para X (3 cuentas). Maneja ROTACIÓN de refresh tokens.
+# Publicador automático para X (3 cuentas). OAuth1 (prioridad) + OAuth2 con ROTACIÓN de refresh tokens.
 import csv, os, json, mimetypes, requests, datetime as dt
 from zoneinfo import ZoneInfo
+from requests_oauthlib import OAuth1
 
+# ===== Constantes =====
 X_API = "https://api.x.com/2"
 UPLOAD_V2 = f"{X_API}/media/upload"
-ALT_V11  = "https://upload.twitter.com/1.1/media/metadata/create.json"
+ALT_V11   = "https://upload.twitter.com/1.1/media/metadata/create.json"  # ALT text (v1.1)
+
+# Endpoints v1.1 (OAuth1)
+API_V11   = "https://api.twitter.com/1.1"
+UPLOAD_V11 = "https://upload.twitter.com/1.1/media/upload.json"
+META_V11   = "https://upload.twitter.com/1.1/media/metadata/create.json"
+
 TZ = ZoneInfo("America/Montevideo")
 
-ACCOUNTS = json.loads(os.getenv("ACCOUNTS_JSON", '{"ACC1":"es","ACC2":"en","ACC3":"de"}'))
-CLIENT_ID = os.getenv("X_CLIENT_ID")
-CSV_FILE = os.getenv("CSV_FILE","calendar.csv")
+ACCOUNTS   = json.loads(os.getenv("ACCOUNTS_JSON", '{"ACC1":"es","ACC2":"en","ACC3":"de"}'))
+CLIENT_ID  = os.getenv("X_CLIENT_ID")
+CSV_FILE   = os.getenv("CSV_FILE","calendar.csv")
 STATE_FILE = os.getenv("STATE_FILE","posted.csv")
 WINDOW_MIN = int(os.getenv("WINDOW_MIN","5"))
 
-NEW_REFRESH = {}  # aquí guardamos refresh tokens nuevos por cuenta
+NEW_REFRESH = {}  # guarda refresh tokens NUEVOS por cuenta (para rotación automática)
 
-def now_utc(): return dt.datetime.now(dt.timezone.utc)
+# ===== Utilidades =====
+def now_utc(): 
+    return dt.datetime.now(dt.timezone.utc)
 
 def parse_row(row):
-    if not row or row["fecha"].strip().startswith("#"): return None
+    if not row or row["fecha"].strip().startswith("#"):
+        return None
     t_local = dt.datetime.fromisoformat(f'{row["fecha"].strip()} {row["hora_MVD"].strip()}:00').replace(tzinfo=TZ)
     return {
         "when_utc": t_local.astimezone(dt.timezone.utc),
@@ -32,6 +43,27 @@ def due(now, when):
     delta = (now - when).total_seconds()/60.0
     return 0 <= delta <= WINDOW_MIN
 
+def get_bytes(path_or_url):
+    if not path_or_url:
+        return None, None
+    if path_or_url.startswith("http"):
+        r = requests.get(path_or_url, timeout=30)
+        r.raise_for_status()
+        return r.content, r.headers.get("content-type","image/jpeg")
+    data = open(path_or_url,"rb").read()
+    return data, (mimetypes.guess_type(path_or_url)[0] or "image/jpeg")
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return set()
+    return set(open(STATE_FILE, encoding="utf-8").read().splitlines())
+
+def save_state(keys):
+    with open(STATE_FILE,"a",encoding="utf-8") as f:
+        for k in keys:
+            f.write(k+"\n")
+
+# ===== OAuth2 (v2) =====
 def refresh_access_token(acc_alias, refresh_token):
     data = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID}
     r = requests.post(
@@ -40,26 +72,16 @@ def refresh_access_token(acc_alias, refresh_token):
         data=data,
         timeout=30,
     )
-    print("TOKEN STATUS:", r.status_code, r.text)  # acá ves el cuerpo si falla (400/401)
+    print("TOKEN STATUS:", r.status_code, r.text)  # debug
     r.raise_for_status()
     j = r.json()
-    # si el refresh rota, lo guardamos para que el job siguiente actualice el Secret
     new_rt = j.get("refresh_token")
     if new_rt and new_rt != refresh_token:
-        NEW_REFRESH[acc_alias] = new_rt
-    print("SCOPES:", j.get("scope"))  # debería incluir: users.read tweet.write media.write offline.access
+        NEW_REFRESH[acc_alias] = new_rt  # guardar para rotar secret
+    print("SCOPES:", j.get("scope"))
     return j["access_token"]
 
-
-def get_bytes(path_or_url):
-    if not path_or_url: return None, None
-    if path_or_url.startswith("http"):
-        r = requests.get(path_or_url, timeout=30); r.raise_for_status()
-        return r.content, r.headers.get("content-type","image/jpeg")
-    data = open(path_or_url,"rb").read()
-    return data, (mimetypes.guess_type(path_or_url)[0] or "image/jpeg")
-
-def upload_media(token, data, content_type):
+def upload_media_v2(token, data, content_type):
     h = {"Authorization": f"Bearer {token}"}
     init = requests.post(UPLOAD_V2, headers=h, files={
         "command":(None,"INIT"), "media_type":(None,content_type),
@@ -70,42 +92,70 @@ def upload_media(token, data, content_type):
         "segment_index":(None,"0"), "media":("file", data, content_type)})
     app.raise_for_status()
     fin = requests.post(UPLOAD_V2, headers=h, files={"command":(None,"FINALIZE"), "media_id":(None,media_id)})
-    fin.raise_for_status(); return media_id
+    fin.raise_for_status()
+    return media_id
 
-def set_alt_text(token, media_id, alt_text):
-    if not alt_text: return
+def set_alt_text_v11(token, media_id, alt_text):
+    if not alt_text:
+        return
     payload = {"media_id": media_id, "alt_text": {"text": alt_text[:1000]}}
     requests.post(ALT_V11, headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
                   data=json.dumps(payload))
 
-def post_tweet(token, text, media_id=None):
+def post_tweet_v2(token, text, media_id=None):
     payload = {"text": text}
     if media_id:
-        payload["media"] = {"media_ids": [media_id]}
-    r = requests.post(
-        f"{X_API}/tweets",
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        data=json.dumps(payload),
-        timeout=30,
-    )
+        payload["media"] = {"media_ids":[media_id]}
+    r = requests.post(f"{X_API}/tweets",
+        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
+        data=json.dumps(payload), timeout=30)
     if r.status_code >= 400:
-        print("POST ERROR:", r.status_code, r.text)  # logea el cuerpo exacto del 403
+        print("POST ERROR:", r.status_code, r.text)
     r.raise_for_status()
     return r.json()["data"]["id"]
 
+# ===== OAuth1 (v1.1) =====
+def oauth1_client(acc_alias):
+    ck = os.getenv("X_API_KEY")
+    cs = os.getenv("X_API_SECRET")
+    at = os.getenv(f"X_ACCESS_TOKEN_{acc_alias}")
+    st = os.getenv(f"X_ACCESS_SECRET_{acc_alias}")
+    if not (ck and cs and at and st):
+        return None
+    return OAuth1(ck, cs, at, st)
 
-def load_state():
-    if not os.path.exists(STATE_FILE): return set()
-    return set(open(STATE_FILE, encoding="utf-8").read().splitlines())
+def upload_media_oauth1(o1, path_or_url, alt_text=""):
+    data, ct = get_bytes(path_or_url)
+    if not data:
+        return None
+    files = {"media": ("file", data, ct or "application/octet-stream")}
+    r = requests.post(UPLOAD_V11, auth=o1, files=files, timeout=60)
+    r.raise_for_status()
+    media_id = r.json()["media_id_string"]
+    if alt_text:
+        payload = {"media_id": media_id, "alt_text": {"text": alt_text[:1000]}}
+        try:
+            requests.post(META_V11, auth=o1, json=payload, timeout=30)
+        except Exception:
+            pass
+    return media_id
 
-def save_state(keys):
-    with open(STATE_FILE,"a",encoding="utf-8") as f:
-        for k in keys: f.write(k+"\n")
+def post_tweet_oauth1(o1, text, media_id=None):
+    params = {"status": text}
+    if media_id:
+        params["media_ids"] = media_id
+    r = requests.post(f"{API_V11}/statuses/update.json", auth=o1, data=params, timeout=30)
+    if r.status_code >= 400:
+        print("POST OAUTH1 ERROR:", r.status_code, r.text)
+    r.raise_for_status()
+    return r.json()["id_str"]
 
+# ===== Main =====
 def main():
     now = now_utc()
     posted = load_state()
     due_rows = []
+
     rows = list(csv.DictReader(open(CSV_FILE, encoding="utf-8")))
     for r in rows:
         item = parse_row(r)
@@ -121,19 +171,29 @@ def main():
     just = []
     for item in due_rows:
         for acc, lang in ACCOUNTS.items():
+            # 1) Intentar OAuth1 si hay claves cargadas (prioridad)
+            o1 = oauth1_client(acc)
+            if o1:
+                media_id = None
+                if item["image"]:
+                    try:
+                        media_id = upload_media_oauth1(o1, item["image"], item["alt"].get(lang,""))
+                    except Exception as e:
+                        print(f"[{acc}] media v1.1 error: {e}. Publico solo texto.")
+                tid = post_tweet_oauth1(o1, item["text"][lang], media_id)
+                print(f"[{acc}] publicado (oauth1) {tid}")
+                continue  # pasar a la siguiente cuenta/fila
+
+            # 2) Si no hay OAuth1, usar OAuth2 (con rotación)
             rt = os.getenv(f"REFRESH_TOKEN_{acc}")
             if not rt:
-                print(f"[{acc}] sin REFRESH_TOKEN_*, salto.")
+                print(f"[{acc}] sin REFRESH_TOKEN_* y sin claves OAuth1, salto.")
                 continue
 
             token = refresh_access_token(acc, rt)
 
-            # debug: confirma user-context y permisos efectivos
-            me = requests.get(
-                f"{X_API}/users/me",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=15,
-            )
+            # Debug de user-context
+            me = requests.get(f"{X_API}/users/me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
             print(f"[{acc}] ME:", me.status_code, me.text[:200])
 
             media_id = None
@@ -141,23 +201,22 @@ def main():
                 data, ct = get_bytes(item["image"])
                 if data:
                     try:
-                        media_id = upload_media(token, data, ct)
-                        set_alt_text(token, media_id, item["alt"].get(lang, ""))
+                        media_id = upload_media_v2(token, data, ct)
+                        set_alt_text_v11(token, media_id, item["alt"].get(lang,""))
                     except Exception as e:
-                        print(f"[{acc}] no pude subir imagen: {e}. Publico solo texto.")
-
-            tid = post_tweet(token, item["text"][lang], media_id)
-            print(f"[{acc}] publicado {tid}")
+                        print(f"[{acc}] no pude subir imagen (v2): {e}. Publico solo texto.")
+            tid = post_tweet_v2(token, item["text"][lang], media_id)
+            print(f"[{acc}] publicado (oauth2) {tid}")
 
         just.append(item["key"])
 
     save_state(just)
 
+    # Si hubo rotación de refresh, dejar archivo para que el job 'update_secrets.py' actualice secrets
     if NEW_REFRESH:
-        with open("new_refresh_tokens.json", "w", encoding="utf-8") as f:
+        with open("new_refresh_tokens.json","w",encoding="utf-8") as f:
             json.dump(NEW_REFRESH, f)
         print("ROTATED:", NEW_REFRESH)
-
 
 if __name__ == "__main__":
     main()
