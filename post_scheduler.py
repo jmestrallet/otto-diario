@@ -1,11 +1,14 @@
-# Publicador automático para X (3 cuentas). SOLO v2 para publicar. Maneja ROTACIÓN de refresh tokens.
+# Publicador automático: media por v1.1 (OAuth1) si hay claves, tweet por v2 (OAuth2).
 import csv, os, json, mimetypes, requests, datetime as dt
 from zoneinfo import ZoneInfo
+from requests_oauthlib import OAuth1
 
 # ===== Constantes =====
 X_API = "https://api.x.com/2"
 UPLOAD_V2 = f"{X_API}/media/upload"
-ALT_V11   = "https://upload.twitter.com/1.1/media/metadata/create.json"  # ALT (v1.1) opcional
+# v1.1 para media/ALT
+UPLOAD_V11 = "https://upload.twitter.com/1.1/media/upload.json"
+META_V11   = "https://upload.twitter.com/1.1/media/metadata/create.json"
 
 TZ = ZoneInfo("America/Montevideo")
 
@@ -15,7 +18,7 @@ CSV_FILE   = os.getenv("CSV_FILE","calendar.csv")
 STATE_FILE = os.getenv("STATE_FILE","posted.csv")
 WINDOW_MIN = int(os.getenv("WINDOW_MIN","5"))
 
-NEW_REFRESH = {}  # guarda refresh tokens NUEVOS por cuenta (para rotación automática)
+NEW_REFRESH = {}  # refresh tokens NUEVOS por cuenta (para rotación)
 
 # ===== Utilidades =====
 def now_utc():
@@ -28,9 +31,9 @@ def parse_row(row):
     return {
         "when_utc": t_local.astimezone(dt.timezone.utc),
         "image": row["imagen"].strip(),
-        "alt": {"es": row["alt_es"].strip(), "en": row["alt_en"].strip(), "de": row["alt_de"].strip()},
-        "text": {"es": row["texto_es"].strip(), "en": row["texto_en"].strip(), "de": row["texto_de"].strip()},
-        "key": f'{row["fecha"]}_{row["hora_MVD"]}_{row["texto_es"][:20]}'
+        "alt": {"es": row.get("alt_es","").strip(), "en": row.get("alt_en","").strip(), "de": row.get("alt_de","").strip()},
+        "text": {"es": row.get("texto_es","").strip(), "en": row.get("texto_en","").strip(), "de": row.get("texto_de","").strip()},
+        "key": f'{row["fecha"]}_{row["hora_MVD"]}_{row.get("texto_es","")[:20]}'
     }
 
 def due(now, when):
@@ -60,18 +63,15 @@ def save_state(keys):
 # ===== OAuth2 (v2) =====
 def refresh_access_token(acc_alias, refresh_token):
     data = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID}
-    r = requests.post(
-        f"{X_API}/oauth2/token",
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        data=data,
-        timeout=30,
-    )
-    print("TOKEN STATUS:", r.status_code, r.text)  # debug
+    r = requests.post(f"{X_API}/oauth2/token",
+                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                      data=data, timeout=30)
+    print("TOKEN STATUS:", r.status_code, r.text)
     r.raise_for_status()
     j = r.json()
     new_rt = j.get("refresh_token")
     if new_rt and new_rt != refresh_token:
-        NEW_REFRESH[acc_alias] = new_rt  # guardar para rotar secret
+        NEW_REFRESH[acc_alias] = new_rt
     print("SCOPES:", j.get("scope"))
     return j["access_token"]
 
@@ -89,17 +89,6 @@ def upload_media_v2(token, data, content_type):
     fin.raise_for_status()
     return media_id
 
-def set_alt_text_v11(token, media_id, alt_text):
-    # v1.1 ALT; si falla, no interrumpe
-    if not alt_text:
-        return
-    try:
-        payload = {"media_id": media_id, "alt_text": {"text": alt_text[:1000]}}
-        requests.post(ALT_V11, headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-                      data=json.dumps(payload), timeout=30)
-    except Exception as e:
-        print("ALT skip:", e)
-
 def post_tweet_v2(token, text, media_id=None):
     payload = {"text": text}
     if media_id:
@@ -111,6 +100,31 @@ def post_tweet_v2(token, text, media_id=None):
         print("POST ERROR:", r.status_code, r.text)
     r.raise_for_status()
     return r.json()["data"]["id"]
+
+# ===== OAuth1 (solo para media/ALT) =====
+def oauth1_client(acc_alias):
+    ck = os.getenv("X_API_KEY")
+    cs = os.getenv("X_API_SECRET")
+    at = os.getenv(f"X_ACCESS_TOKEN_{acc_alias}")
+    st = os.getenv(f"X_ACCESS_SECRET_{acc_alias}")
+    if not (ck and cs and at and st):
+        return None
+    return OAuth1(ck, cs, at, st)
+
+def upload_media_oauth1(o1, data, content_type):
+    files = {"media": ("file", data, content_type or "application/octet-stream")}
+    r = requests.post(UPLOAD_V11, auth=o1, files=files, timeout=60)
+    r.raise_for_status()
+    return r.json()["media_id_string"]
+
+def set_alt_text_oauth1(o1, media_id, alt_text):
+    if not alt_text:
+        return
+    try:
+        payload = {"media_id": media_id, "alt_text": {"text": alt_text[:1000]}}
+        requests.post(META_V11, auth=o1, json=payload, timeout=30)
+    except Exception as e:
+        print("ALT skip:", e)
 
 # ===== Main =====
 def main():
@@ -140,7 +154,7 @@ def main():
 
             token = refresh_access_token(acc, rt)
 
-            # Debug: confirmar user-context (repite 403 si faltan scopes)
+            # Confirma user-context
             me = requests.get(f"{X_API}/users/me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
             print(f"[{acc}] ME:", me.status_code, me.text[:200])
 
@@ -148,11 +162,17 @@ def main():
             if item["image"]:
                 data, ct = get_bytes(item["image"])
                 if data:
+                    # Preferir v1.1 para media si hay OAuth1; si no, usar v2
+                    o1 = oauth1_client(acc)
                     try:
-                        media_id = upload_media_v2(token, data, ct)
-                        set_alt_text_v11(token, media_id, item["alt"].get(lang,""))
+                        if o1:
+                            media_id = upload_media_oauth1(o1, data, ct)
+                            set_alt_text_oauth1(o1, media_id, item["alt"].get(lang,""))
+                        else:
+                            media_id = upload_media_v2(token, data, ct)
+                            # sin OAuth1: nos saltamos ALT (v1.1) silenciosamente
                     except Exception as e:
-                        print(f"[{acc}] no pude subir imagen (v2): {e}. Publico solo texto.")
+                        print(f"[{acc}] no pude subir imagen: {e}. Publico solo texto.")
 
             tid = post_tweet_v2(token, item["text"][lang], media_id)
             print(f"[{acc}] publicado (oauth2) {tid}")
@@ -167,5 +187,4 @@ def main():
         print("ROTATED:", NEW_REFRESH)
 
 if __name__ == "__main__":
-    import json
     main()
