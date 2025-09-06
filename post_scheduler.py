@@ -1,4 +1,4 @@
-# Publicador automático para X (3 cuentas, imágenes y ALT). Hora America/Montevideo.
+# Publicador automático para X (3 cuentas). Maneja ROTACIÓN de refresh tokens.
 import csv, os, json, mimetypes, requests, datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,8 @@ CLIENT_ID = os.getenv("X_CLIENT_ID")
 CSV_FILE = os.getenv("CSV_FILE","calendar.csv")
 STATE_FILE = os.getenv("STATE_FILE","posted.csv")
 WINDOW_MIN = int(os.getenv("WINDOW_MIN","5"))
+
+NEW_REFRESH = {}  # aquí guardamos refresh tokens nuevos por cuenta
 
 def now_utc(): return dt.datetime.now(dt.timezone.utc)
 
@@ -30,19 +32,19 @@ def due(now, when):
     delta = (now - when).total_seconds()/60.0
     return 0 <= delta <= WINDOW_MIN
 
-def refresh_access_token(refresh_token):
-    data = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": CLIENT_ID,
-    }
+def refresh_access_token(acc_alias, refresh_token):
+    data = {"grant_type":"refresh_token","refresh_token":refresh_token,"client_id":CLIENT_ID}
     r = requests.post(f"{X_API}/oauth2/token",
-                      headers={"Content-Type": "application/x-www-form-urlencoded"},
+                      headers={"Content-Type":"application/x-www-form-urlencoded"},
                       data=data, timeout=30)
-    print("TOKEN STATUS:", r.status_code, r.text)  # <— verás "scope": "..."
+    if r.status_code >= 400:
+        print("TOKEN ERROR:", r.status_code, r.text)
     r.raise_for_status()
     j = r.json()
-    print("SCOPES:", j.get("scope"))
+    # guarda refresh nuevo si vino rotado
+    new_rt = j.get("refresh_token")
+    if new_rt and new_rt != refresh_token:
+        NEW_REFRESH[acc_alias] = new_rt
     return j["access_token"]
 
 def get_bytes(path_or_url):
@@ -73,18 +75,13 @@ def set_alt_text(token, media_id, alt_text):
                   data=json.dumps(payload))
 
 def post_tweet(token, text, media_id=None):
-    import requests, json
     payload = {"text": text}
     if media_id: payload["media"] = {"media_ids":[media_id]}
-    r = requests.post(f"{X_API}/tweets",
-        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-        data=json.dumps(payload))
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        print("ERROR POST:", r.status_code, r.text)
-        raise
-    return r.json()["data"]["id"]
+    r = requests.post(f"{X_API}/tweets", headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
+                      data=json.dumps(payload))
+    if r.status_code >= 400:
+        print("POST ERROR:", r.status_code, r.text)
+    r.raise_for_status(); return r.json()["data"]["id"]
 
 def load_state():
     if not os.path.exists(STATE_FILE): return set()
@@ -101,16 +98,17 @@ def main():
         item = parse_row(r)
         if not item or item["key"] in posted: continue
         if due(now, item["when_utc"]): due_rows.append(item)
-    if not due_rows: print("Nada para publicar ahora."); return
+    if not due_rows:
+        print("Nada para publicar ahora."); return
 
     just=[]
     for item in due_rows:
         for acc, lang in ACCOUNTS.items():
             rt = os.getenv(f"REFRESH_TOKEN_{acc}")
-            if not rt: 
+            if not rt:
                 print(f"[{acc}] sin REFRESH_TOKEN_*, salto."); 
                 continue
-            token = refresh_access_token(rt)
+            token = refresh_access_token(acc, rt)
             media_id = None
             if item["image"]:
                 data, ct = get_bytes(item["image"])
@@ -124,6 +122,12 @@ def main():
             print(f"[{acc}] publicado {tid}")
         just.append(item["key"])
     save_state(just)
+
+    # Si hubo rotación, escribimos un archivo para que el siguiente paso actualice Secrets
+    if NEW_REFRESH:
+        with open("new_refresh_tokens.json","w",encoding="utf-8") as f:
+            json.dump(NEW_REFRESH, f)
+        print("ROTATED:", NEW_REFRESH)
 
 if __name__ == "__main__":
     main()
