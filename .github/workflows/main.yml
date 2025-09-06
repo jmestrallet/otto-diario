@@ -1,8 +1,8 @@
 name: Publicador WW2
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+    - cron: "*/5 * * * *"   # corre cada 5 minutos (UTC)
+  workflow_dispatch: {}      # <-- esto habilita "Run workflow"
 
 permissions:
   contents: write
@@ -16,33 +16,32 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install requests requests_oauthlib pynacl
-    - name: Ejecutar publicador
-  env:
-    # OAuth2 (queda como fallback; no lo toques)
-    X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
-    REFRESH_TOKEN_ACC1: ${{ secrets.REFRESH_TOKEN_ACC1 }}
-    REFRESH_TOKEN_ACC2: ${{ secrets.REFRESH_TOKEN_ACC2 }}
-    REFRESH_TOKEN_ACC3: ${{ secrets.REFRESH_TOKEN_ACC3 }}
 
-    # Mapeo de cuentas
-    ACCOUNTS_JSON: '{"ACC1":"es","ACC2":"en","ACC3":"de"}'
+      - name: Ejecutar publicador
+        env:
+          # OAuth2 (fallback)
+          X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          REFRESH_TOKEN_ACC1: ${{ secrets.REFRESH_TOKEN_ACC1 }}
+          REFRESH_TOKEN_ACC2: ${{ secrets.REFRESH_TOKEN_ACC2 }}
+          REFRESH_TOKEN_ACC3: ${{ secrets.REFRESH_TOKEN_ACC3 }}
 
-    # OAuth1 (LO CLAVE PARA USAR AHORA)
-    X_API_KEY: ${{ secrets.X_API_KEY }}
-    X_API_SECRET: ${{ secrets.X_API_SECRET }}
-    X_ACCESS_TOKEN_ACC1: ${{ secrets.X_ACCESS_TOKEN_ACC1 }}
-    X_ACCESS_SECRET_ACC1: ${{ secrets.X_ACCESS_SECRET_ACC1 }}
-    # (cuando sumes las otras dos, agregás:)
-    X_ACCESS_TOKEN_ACC2: ${{ secrets.X_ACCESS_TOKEN_ACC2 }}
-    X_ACCESS_SECRET_ACC2: ${{ secrets.X_ACCESS_SECRET_ACC2 }}
-    X_ACCESS_TOKEN_ACC3: ${{ secrets.X_ACCESS_TOKEN_ACC3 }}
-    X_ACCESS_SECRET_ACC3: ${{ secrets.X_ACCESS_SECRET_ACC3 }}
+          # OAuth1 (lo que queremos usar ahora)
+          X_API_KEY: ${{ secrets.X_API_KEY }}
+          X_API_SECRET: ${{ secrets.X_API_SECRET }}
+          X_ACCESS_TOKEN_ACC1: ${{ secrets.X_ACCESS_TOKEN_ACC1 }}
+          X_ACCESS_SECRET_ACC1: ${{ secrets.X_ACCESS_SECRET_ACC1 }}
+          # (cuando sumes las otras dos cuentas)
+          X_ACCESS_TOKEN_ACC2: ${{ secrets.X_ACCESS_TOKEN_ACC2 }}
+          X_ACCESS_SECRET_ACC2: ${{ secrets.X_ACCESS_SECRET_ACC2 }}
+          X_ACCESS_TOKEN_ACC3: ${{ secrets.X_ACCESS_TOKEN_ACC3 }}
+          X_ACCESS_SECRET_ACC3: ${{ secrets.X_ACCESS_SECRET_ACC3 }}
 
-    # Archivos/ventana
-    CSV_FILE: "calendar.csv"
-    STATE_FILE: "posted.csv"
-    WINDOW_MIN: "5"
-  run: python post_scheduler.py
+          # Archivos y ventana
+          ACCOUNTS_JSON: '{"ACC1":"es","ACC2":"en","ACC3":"de"}'
+          CSV_FILE: "calendar.csv"
+          STATE_FILE: "posted.csv"
+          WINDOW_MIN: "5"
+        run: python post_scheduler.py
 
       - name: Rotar secrets si hay refresh nuevos
         env:
@@ -54,6 +53,7 @@ jobs:
           else
             echo "No hay refresh nuevos."
           fi
+
       - name: Commit de estado
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
