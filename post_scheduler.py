@@ -108,8 +108,14 @@ def oauth1_client(acc_alias):
     at = os.getenv(f"X_ACCESS_TOKEN_{acc_alias}")
     st = os.getenv(f"X_ACCESS_SECRET_{acc_alias}")
     if not (ck and cs and at and st):
+        missing = [n for n,v in [
+            ("X_API_KEY", ck), ("X_API_SECRET", cs),
+            (f"X_ACCESS_TOKEN_{acc_alias}", at), (f"X_ACCESS_SECRET_{acc_alias}", st)
+        ] if not v]
+        print(f"[{acc_alias}] OAuth1 faltan vars: {', '.join(missing)}")
         return None
     return OAuth1(ck, cs, at, st)
+
 
 def upload_media_oauth1(o1, data, content_type):
     files = {"media": ("file", data, content_type or "application/octet-stream")}
@@ -158,21 +164,28 @@ def main():
             me = requests.get(f"{X_API}/users/me", headers={"Authorization": f"Bearer {token}"}, timeout=15)
             print(f"[{acc}] ME:", me.status_code, me.text[:200])
 
-            media_id = None
-            if item["image"]:
-                data, ct = get_bytes(item["image"])
-                if data:
-                    # Preferir v1.1 para media si hay OAuth1; si no, usar v2
-                    o1 = oauth1_client(acc)
-                    try:
-                        if o1:
-                            media_id = upload_media_oauth1(o1, data, ct)
-                            set_alt_text_oauth1(o1, media_id, item["alt"].get(lang,""))
-                        else:
-                            media_id = upload_media_v2(token, data, ct)
-                            # sin OAuth1: nos saltamos ALT (v1.1) silenciosamente
-                    except Exception as e:
-                        print(f"[{acc}] no pude subir imagen: {e}. Publico solo texto.")
+           media_id = None
+if item["image"]:
+    data, ct = get_bytes(item["image"])
+    if data:
+        o1 = oauth1_client(acc)
+        try:
+            if o1:
+                media_id = upload_media_oauth1(o1, data, ct)
+                set_alt_text_oauth1(o1, media_id, item["alt"].get(lang, ""))
+            else:
+                media_id = upload_media_v2(token, data, ct)
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", None)
+            body = getattr(e.response, "text", "")[:200]
+            print(f"[{acc}] v1.1 upload fallo ({code}): {body} — intento v2…")
+            try:
+                media_id = upload_media_v2(token, data, ct)
+            except Exception as e2:
+                print(f"[{acc}] v2 upload fallo: {e2}. Publico solo texto.")
+        except Exception as e:
+            print(f"[{acc}] no pude subir imagen: {e}. Publico solo texto.")
+
 
             tid = post_tweet_v2(token, item["text"][lang], media_id)
             print(f"[{acc}] publicado (oauth2) {tid}")
