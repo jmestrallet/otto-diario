@@ -1,0 +1,38 @@
+name: Publicador WW2
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # corre cada 5 minutos (UTC)
+  workflow_dispatch: {}      # botón "Run workflow" manual
+
+permissions:
+  contents: write            # para registrar posted.csv
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Ejecutar publicador
+        env:
+          X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          ACCOUNTS_JSON: '{"ACC1":"es","ACC2":"en","ACC3":"de"}'
+          REFRESH_TOKEN_ACC1: ${{ secrets.REFRESH_TOKEN_ACC1 }}
+          REFRESH_TOKEN_ACC2: ${{ secrets.REFRESH_TOKEN_ACC2 }}
+          REFRESH_TOKEN_ACC3: ${{ secrets.REFRESH_TOKEN_ACC3 }}
+          CSV_FILE: "calendar.csv"
+          STATE_FILE: "posted.csv"
+          WINDOW_MIN: "5"
+        run: python post_scheduler.py
+      - name: Commit de estado
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            git config user.name "actions-bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add posted.csv
+            git commit -m "log de publicados [skip ci]" || true
+            git push
+          fi
