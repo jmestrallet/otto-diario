@@ -1,11 +1,11 @@
 name: Publicador WW2
 on:
   schedule:
-    - cron: "*/5 * * * *"   # corre cada 5 minutos (UTC)
-  workflow_dispatch: {}      # botón "Run workflow" manual
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write            # para registrar posted.csv
+  contents: write
 
 jobs:
   run:
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests
+      - run: pip install requests pynacl
       - name: Ejecutar publicador
         env:
           X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
@@ -27,12 +27,23 @@ jobs:
           STATE_FILE: "posted.csv"
           WINDOW_MIN: "5"
         run: python post_scheduler.py
+      - name: Rotar secrets si hay refresh nuevos
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ -f new_refresh_tokens.json ]; then
+            python .github/update_secrets.py
+          else
+            echo "No hay refresh nuevos."
+          fi
       - name: Commit de estado
         run: |
           if [[ -n "$(git status --porcelain)" ]]; then
             git config user.name "actions-bot"
             git config user.email "actions@users.noreply.github.com"
-            git add posted.csv
-            git commit -m "log de publicados [skip ci]" || true
-            git push
+            git add posted.csv || true
+            git add new_refresh_tokens.json || true
+            git commit -m "estado/rotaciones [skip ci]" || true
+            git push || true
           fi
