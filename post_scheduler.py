@@ -37,14 +37,14 @@ def refresh_access_token(acc_alias, refresh_token):
     r = requests.post(f"{X_API}/oauth2/token",
                       headers={"Content-Type":"application/x-www-form-urlencoded"},
                       data=data, timeout=30)
-    if r.status_code >= 400:
-        print("TOKEN ERROR:", r.status_code, r.text)
+    print("TOKEN STATUS:", r.status_code, r.text)  # <— veremos "scope": "..."
     r.raise_for_status()
     j = r.json()
     # guarda refresh nuevo si vino rotado
     new_rt = j.get("refresh_token")
     if new_rt and new_rt != refresh_token:
         NEW_REFRESH[acc_alias] = new_rt
+    print("SCOPES:", j.get("scope"))              # <— debería incluir tweet.write y offline.access
     return j["access_token"]
 
 def get_bytes(path_or_url):
@@ -77,11 +77,13 @@ def set_alt_text(token, media_id, alt_text):
 def post_tweet(token, text, media_id=None):
     payload = {"text": text}
     if media_id: payload["media"] = {"media_ids":[media_id]}
-    r = requests.post(f"{X_API}/tweets", headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-                      data=json.dumps(payload))
+    r = requests.post(f"{X_API}/tweets",
+        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
+        data=json.dumps(payload))
     if r.status_code >= 400:
-        print("POST ERROR:", r.status_code, r.text)
-    r.raise_for_status(); return r.json()["data"]["id"]
+        print("POST ERROR:", r.status_code, r.text)  # <— cuerpo exacto del 403
+    r.raise_for_status()
+    return r.json()["data"]["id"]
 
 def load_state():
     if not os.path.exists(STATE_FILE): return set()
