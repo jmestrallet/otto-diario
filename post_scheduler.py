@@ -5,10 +5,9 @@ from requests_oauthlib import OAuth1
 
 # ===== Constantes =====
 X_API = "https://api.x.com/2"
-UPLOAD_V2 = f"{X_API}/media/upload"
-# v1.1 para media/ALT
-UPLOAD_V11 = "https://upload.twitter.com/1.1/media/upload.json"
-META_V11   = "https://upload.twitter.com/1.1/media/metadata/create.json"
+# Endpoint de subida de media (v1.1, también funciona con OAuth2)
+UPLOAD_MEDIA = "https://upload.twitter.com/1.1/media/upload.json"
+META_V11     = "https://upload.twitter.com/1.1/media/metadata/create.json"
 
 TZ = ZoneInfo("America/Montevideo")
 
@@ -77,15 +76,15 @@ def refresh_access_token(acc_alias, refresh_token):
 
 def upload_media_v2(token, data, content_type):
     h = {"Authorization": f"Bearer {token}"}
-    init = requests.post(UPLOAD_V2, headers=h, files={
+    init = requests.post(UPLOAD_MEDIA, headers=h, files={
         "command":(None,"INIT"), "media_type":(None,content_type),
         "total_bytes":(None,str(len(data))), "media_category":(None,"tweet_image")})
     init.raise_for_status(); media_id = init.json()["data"]["id"]
-    app = requests.post(UPLOAD_V2, headers=h, files={
+    app = requests.post(UPLOAD_MEDIA, headers=h, files={
         "command":(None,"APPEND"), "media_id":(None,media_id),
         "segment_index":(None,"0"), "media":("file", data, content_type)})
     app.raise_for_status()
-    fin = requests.post(UPLOAD_V2, headers=h, files={"command":(None,"FINALIZE"), "media_id":(None,media_id)})
+    fin = requests.post(UPLOAD_MEDIA, headers=h, files={"command":(None,"FINALIZE"), "media_id":(None,media_id)})
     fin.raise_for_status()
     return media_id
 
@@ -120,7 +119,7 @@ def oauth1_client(acc_alias):
 
 def upload_media_oauth1(o1, data, content_type):
     files = {"media": ("file", data, content_type or "application/octet-stream")}
-    r = requests.post(UPLOAD_V11, auth=o1, files=files, timeout=60)
+    r = requests.post(UPLOAD_MEDIA, auth=o1, files=files, timeout=60)
     r.raise_for_status()
     return r.json()["media_id_string"]
 
