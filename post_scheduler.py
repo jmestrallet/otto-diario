@@ -65,11 +65,18 @@ def set_alt_text(token, media_id, alt_text):
                   data=json.dumps(payload))
 
 def post_tweet(token, text, media_id=None):
+    import requests, json
     payload = {"text": text}
     if media_id: payload["media"] = {"media_ids":[media_id]}
-    r = requests.post(f"{X_API}/tweets", headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-                      data=json.dumps(payload))
-    r.raise_for_status(); return r.json()["data"]["id"]
+    r = requests.post(f"{X_API}/tweets",
+        headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
+        data=json.dumps(payload))
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        print("ERROR POST:", r.status_code, r.text)
+        raise
+    return r.json()["data"]["id"]
 
 def load_state():
     if not os.path.exists(STATE_FILE): return set()
