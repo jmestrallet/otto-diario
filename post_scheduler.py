@@ -62,17 +62,27 @@ def save_state(keys):
 # ===== OAuth2 (v2) =====
 def refresh_access_token(acc_alias, refresh_token):
     data = {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CLIENT_ID}
-    r = requests.post(f"{X_API}/oauth2/token",
-                      headers={"Content-Type": "application/x-www-form-urlencoded"},
-                      data=data, timeout=30)
-    print("TOKEN STATUS:", r.status_code, r.text)
-    r.raise_for_status()
+    try:
+        r = requests.post(
+            f"{X_API}/oauth2/token",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data=data,
+            timeout=30,
+        )
+        print("TOKEN STATUS:", r.status_code, r.text)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        # On failure we don't want the whole script/tests to blow up,
+        # just skip the account.  Returning ``None`` allows the caller to
+        # decide how to proceed without crashing.
+        print(f"[{acc_alias}] token refresh error: {e}")
+        return None
     j = r.json()
     new_rt = j.get("refresh_token")
     if new_rt and new_rt != refresh_token:
         NEW_REFRESH[acc_alias] = new_rt
     print("SCOPES:", j.get("scope"))
-    return j["access_token"]
+    return j.get("access_token")
 
 def upload_media_v2(token, data, content_type):
     h = {"Authorization": f"Bearer {token}"}
@@ -159,6 +169,9 @@ def main():
                 continue
 
             token = refresh_access_token(acc, rt)
+            if not token:
+                print(f"[{acc}] no pude refrescar token, salto.")
+                continue
 
             # Confirma user-context
             me = requests.get(f"{X_API}/users/me",
