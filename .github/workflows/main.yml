@@ -1,66 +1,118 @@
-name: Publicador WW2
+name: X scheduler
+
 on:
   schedule:
-    - cron: "*/5 * * * *"   # corre cada 5 minutos (UTC)
-  workflow_dispatch: {}      # <-- esto habilita "Run workflow"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write
+
+concurrency:
+  group: otto-diario-scheduler
+  cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests requests_oauthlib pynacl
 
-      - name: Ejecutar publicador
+      - name: Setup Node.js (para cifrar secrets)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          npm i tweetsodium
+
+      - name: Run scheduler
         env:
-          # OAuth2 (fallback)
           X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+          # Seguridad: leer de Secrets; si faltan, cae a Variables (solo para el primer run).
           REFRESH_TOKEN_ACC1: ${{ secrets.REFRESH_TOKEN_ACC1 }}
           REFRESH_TOKEN_ACC2: ${{ secrets.REFRESH_TOKEN_ACC2 }}
           REFRESH_TOKEN_ACC3: ${{ secrets.REFRESH_TOKEN_ACC3 }}
 
-          # OAuth1 (lo que queremos usar ahora)
-          X_API_KEY: ${{ secrets.X_API_KEY }}
-          X_API_SECRET: ${{ secrets.X_API_SECRET }}
-          X_ACCESS_TOKEN_ACC1: ${{ secrets.X_ACCESS_TOKEN_ACC1 }}
-          X_ACCESS_SECRET_ACC1: ${{ secrets.X_ACCESS_SECRET_ACC1 }}
-          # (cuando sumes las otras dos cuentas)
-          X_ACCESS_TOKEN_ACC2: ${{ secrets.X_ACCESS_TOKEN_ACC2 }}
-          X_ACCESS_SECRET_ACC2: ${{ secrets.X_ACCESS_SECRET_ACC2 }}
-          X_ACCESS_TOKEN_ACC3: ${{ secrets.X_ACCESS_TOKEN_ACC3 }}
-          X_ACCESS_SECRET_ACC3: ${{ secrets.X_ACCESS_SECRET_ACC3 }}
 
-          # Archivos y ventana
-          ACCOUNTS_JSON: '{"ACC1":"es","ACC2":"en","ACC3":"de"}'
-          CSV_FILE: "calendar.csv"
-          STATE_FILE: "posted.csv"
-          WINDOW_MIN: "5"
-        run: python post_scheduler.py
-
-      - name: Rotar secrets si hay refresh nuevos
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-          GH_REPO: ${{ github.repository }}
+          ACCOUNTS_JSON: ${{ vars.ACCOUNTS_JSON }}
+          CSV_FILE: ${{ vars.CSV_FILE }}
+          STATE_FILE: ${{ vars.STATE_FILE }}
+          WINDOW_MIN: ${{ vars.WINDOW_MIN }}
         run: |
-          if [ -f new_refresh_tokens.json ]; then
-            python .github/update_secrets.py
-          else
-            echo "No hay refresh nuevos."
+          python post_scheduler.py
+
+      - name: Subir artefacto con tokens rotados (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: new-refresh-tokens
+          path: .tokens_out.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Commit posted.csv y threads.json (persist state)
+        if: always()
+        run: |
+          CHANGED=0
+          if [ -f "posted.csv" ]; then CHANGED=1; fi
+          if [ -f "threads.json" ]; then CHANGED=1; fi
+          if [ "$CHANGED" = "1" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git fetch origin
+            git checkout $GITHUB_REF_NAME || true
+            git pull --rebase --autostash origin $GITHUB_REF_NAME || true
+            git add posted.csv threads.json
+            git commit -m "chore: update state files [skip ci]" || echo "No changes"
+            git push || echo "No push needed"
           fi
 
-      - name: Commit de estado
-        run: |
-          if [[ -n "$(git status --porcelain)" ]]; then
-            git config user.name "actions-bot"
-            git config user.email "actions@users.noreply.github.com"
-            git add posted.csv || true
-            git add new_refresh_tokens.json || true
-            git commit -m "estado/rotaciones [skip ci]" || true
-            git push || true
-          fi
+      - name: Rotar refresh tokens en Secrets (seguro)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_ADMIN_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const sodium = require('tweetsodium');
+            const path = '.tokens_out.json';
+            if (!fs.existsSync(path)) {
+              core.info('No hay tokens nuevos.');
+              return;
+            }
+            const newTokens = JSON.parse(fs.readFileSync(path, 'utf8'));
+
+            // Obtener clave pública del repo para cifrar cada secret
+            const { data: pub } = await github.request('GET /repos/{owner}/{repo}/actions/secrets/public-key', {
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            for (const [acc, token] of Object.entries(newTokens)) {
+              const name = `REFRESH_TOKEN_${acc}`;
+              const messageBytes = Buffer.from(token);
+              const keyBytes = Buffer.from(pub.key, 'base64');
+              const encryptedBytes = sodium.seal(messageBytes, keyBytes);
+              const encrypted = Buffer.from(encryptedBytes).toString('base64');
+
+              await github.request('PUT /repos/{owner}/{repo}/actions/secrets/{secret_name}', {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                secret_name: name,
+                encrypted_value: encrypted,
+                key_id: pub.key_id
+              });
+              core.info(`Rotado secret ${name}`);
+            }
